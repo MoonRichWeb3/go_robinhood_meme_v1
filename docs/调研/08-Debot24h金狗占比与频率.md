@@ -1,6 +1,6 @@
 # 08 Debot 24h 金狗平台占比与时间频率
 
-- 最新更新时间：2026-09-01 16:15 (UTC+8)
+- 最新更新时间：2026-09-01 17:50 (UTC+8)
 - 适用范围：Robinhood 上 Debot 金/银/铜去重只数对比；只调研
 - 来源清单：
   - Debot 文档定义：<https://docs.debot.ai/en/basic-features/ai-signal-tutorial>
@@ -77,7 +77,7 @@ Debot 24h `interval=24h` 的 Robinhood 汇总：新币 **25,898**，毕业 **612
 
 ## 6. 显式缺口
 
-- Debot `long` 的链上工厂地址本轮未写入 `02` 常量，需要单独核 `long.xyz` 部署表。
+- Debot `long` 工厂已核：`LongLauncher` `0x22e99278…eeED`，见 `09`、`02` §3.5。未把 Debot 24h 全部 8 只金狗逐个交叉创建交易（已核 SENDER）。
 - o1 / Flap / Trench 的 24h 新币数 Debot latest 只返回成交额 top3，没有全表。
 - 未打标 6 只金狗只核了 1 只自定义部署。
 - 非登录抓取会被 Cloudflare 拦；本统计依赖浏览器里已打开的 Debot 会话。
