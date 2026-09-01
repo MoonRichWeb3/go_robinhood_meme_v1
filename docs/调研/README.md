@@ -1,6 +1,6 @@
 # Robinhood Chain Meme 调研索引
 
-- 最新更新时间：2026-09-01 17:50 (UTC+8)
+- 最新更新时间：2026-09-01 18:20 (UTC+8)
 - 适用范围：`go_robinhood_meme_v1` 立项前调研；只记录如何监听、如何解析、如何交易；本目录不含实现代码。
 - 来源清单：
   - 本地：`go_fourmeme_v3/internal/config/constants.go`、`internal/core/parser/`、`internal/core/trade/`
@@ -37,7 +37,7 @@
 | `03-样本交易解析.md` | 用户给的两笔二级 swap |
 | `04-监听与交易方案.md` | 对照 Fourmeme 的骨架 |
 | `05-Debot金狗发射台.md` | Debot 卡片 → 工厂归属 |
-| `06-Pons-V2解析与交易.md` | 发射 / CurveBuy-Sell / 如何买 |
-| `07-o1exchange-RWA解析与交易.md` | `createLaunch` / LaunchHook.Trade / 如何买 |
+| `06-Pons-V2解析与交易.md` | 发射 / CurveBuy-Sell / 如何买 / **曲线价格算法** |
+| `07-o1exchange-RWA解析与交易.md` | `createLaunch` / LaunchHook.Trade / 如何买 / **v4 价格算法** |
 | `08-Debot24h金狗占比与频率.md` | 24h 金/银/铜只数、平台占比、出金率、预警时段 |
-| `09-Long解析与交易.md` | `LongLauncher.create` / `LaunchCreated` / v4 Swap 归因 |
+| `09-Long解析与交易.md` | `LongLauncher.create` / `LaunchCreated` / v4 Swap 归因 / **v4 价格算法** |

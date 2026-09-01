@@ -1,6 +1,6 @@
 # 07 o1 Launchpad（股票配对）：发射事件、买卖事件、如何解析、如何交易
 
-- 最新更新时间：2026-09-01 16:30 (UTC+8)
+- 最新更新时间：2026-09-01 21:16 (UTC+8)
 - 适用范围：Debot 本屏金狗 Rabbit（273x）所属协议；含 Robinhood 上加密货币配对孪生工厂。只调研，不实现
 - 来源清单：
   - <https://docs.o1.exchange/launchpad/reference/production-contracts.md>
@@ -8,6 +8,7 @@
   - <https://docs.o1.exchange/launchpad/reference/events-functions.md>
   - <https://docs.o1.exchange/launchpad/integration/direct.md>
   - <https://docs.o1.exchange/launchpad/trading/fees-referrals.md>
+  - Uniswap v4 / v3 `sqrtPriceX96` 定义（与 `02` 共用）
   - Blockscout 已验证 ABI：`RWAERC20LaunchpadFactory`、`LaunchHook`
   - Rabbit 创建交易 `0x2773f014…2672`
 
@@ -16,6 +17,8 @@
 o1 **没有 Pons 那种独立 bonding 合约**。`createLaunch` 当场部署 ERC-20、开 Uniswap v4 池、把供应锁进 LaunchHook 单边流动性。买卖 = 带 LaunchHook 的 v4 Swap + Universal Router。
 
 Rabbit 走的是 **股票配对工厂**，报价资产是股票代币 **WYFI**，不是 ETH。用 ETH 直接买会路径错误。代币地址必须以 `01` 结尾。
+
+**成交价：** exec 用本笔 meme 与 quote 的数量比，再折 U。开盘 anti-snipe 时 exec 会远高于 sqrt 中间价，**交易表必须用 exec**。币对表按需求刷最近成交 U（`01` §3.8），不要每笔写 sqrt。sqrt 公式仍见下节，仅作池子中间价理解。
 
 ## 1. 两套 Robinhood 工厂（不要混）
 
@@ -108,7 +111,57 @@ topic0 0x94828ef2a4522ef87a2b6e4888550121212246d1a5b67ae9e967ce88210742ea
 
 Rabbit 买的是 **WYFI → Rabbit**，不是 ETH → Rabbit。中间若经 GMGN 多跳（样本 2 那种），不要当买入模板。
 
-## 5. 如何交易（编码口径，未下单）
+## 5. 价格计算（股票盘与加密盘同一套池子公式）
+
+o1 没有曲线。价格只来自 Uniswap v4 单例池。股票工厂和加密工厂 **公式相同**，差别只在 quote 是什么、以及 `usd_per_1_quote`。
+
+创建时 `Initialize` 已带 `sqrtPriceX96`、`currency0`、`currency1`。之后每笔 `Swap` 的 data 里也有成交后的 `sqrtPriceX96`，**不必每笔再 `getSlot0`**（call 可作校验）。
+
+### spot（中间价；需求里币对表展示用最近成交 U）
+
+写库节奏见需求 `01` §3.8，不要每笔 Swap UPDATE 币对表。下面公式仍可用于理解池子中间价；**交易表 / 刷盘单价用 exec**。
+
+```text
+Q96 = 2^96
+raw = (sqrtPriceX96 / Q96)^2     # 1 wei currency0 换多少 wei currency1
+
+# 先分清哪侧是 meme、哪侧是 quote（地址排序，meme 不一定是 token1）
+# Rabbit：quote=WYFI，meme=Rabbit；QI 样本 currency0=QUBT、currency1=QI
+
+若 meme == currency1 且 quote == currency0：
+    spot_quote = (Q96^2 / sqrtPriceX96^2) * 10^(quoteDec - tokenDec)
+    即 1/raw 再缩小数位
+若 meme == currency0 且 quote == currency1：
+    spot_quote = raw * 10^(quoteDec - tokenDec)
+
+spot_usd = spot_quote * usd_per_1_quote
+```
+
+| 分类 | quote | usd_per_1_quote |
+| --- | --- | --- |
+| `o1_stock` | 股票代币（WYFI、QUBT…） | 该股 USD（喂价待实现） |
+| `o1_crypto` | ETH `0x0` / WETH 或 USDG | eth_usd 或 1 |
+
+Robinhood 股票代币样本为 18 decimals；USDG 为 6。必须用链上 `decimals()`，不要写死。
+
+池子 LP `fee=0`，手续费在 LaunchHook（通常 1% 打在 quote 上）。**sqrtPrice 是池子中间价，未含 hook 费。** 这正是币对表要的 spot。
+
+### exec（写交易表）
+
+用本笔 **实际转账的 quote 与 meme**（Transfer 净额优先；Swap `amount0/1` 作交叉）：
+
+```text
+exec_quote = abs(quote_amount_human) / abs(token_amount_human)
+exec_usd   = exec_quote * usd_per_1_quote
+```
+
+方向：meme 流入用户 = 买；meme 离开用户 = 卖。不要用 `Swap.sender`。探测里出现过 Swap 符号与 Transfer 不一致，**exec 以 Transfer 为准**。
+
+anti-snipe（Robinhood 16 秒，费率 99%→1%）：用户实付 quote 远大于中间价。`exec_quote >> spot_quote` 是预期现象；**交易表和币对表展示都用 exec 折 U**，不要用 sqrt 冒充成交价。
+
+无 Swap、只有创建：不刷 `price_usd`，exec 无。
+
+## 6. 如何交易（编码口径，未下单）
 
 官方推荐：v4 Quoter 报价 → Permit2 → Universal Router。保留精确 PoolKey：
 
@@ -132,7 +185,7 @@ hookData（官方 direct 集成）：推荐人地址 + `bytes32` comment。无�
 
 o1 另提供 Public API `quote-a-swap` / `prepare-a-swap` 生成 UR calldata。自建 bot **建议 / 推断**仍应自己编 UR，API 只作对照；实现阶段再定。
 
-## 6. 和 Pons / Fourmeme 对照
+## 7. 和 Pons / Fourmeme 对照
 
 | | Pons V2 | o1 股票盘 | Fourmeme |
 | --- | --- | --- | --- |
@@ -143,7 +196,7 @@ o1 另提供 Public API `quote-a-swap` / `prepare-a-swap` 生成 UR calldata。�
 | 狙击 | 5 秒指数税，读 `currentSnipeTaxBps` | 16 秒线性 99%→1% | 平台规则不同 |
 | 毕业 | 有 | 无（流动性永久锁） | 无 |
 
-## 7. 显式缺口
+## 8. 显式缺口
 
 - Base 的 `createLaunchAndBuy` 适配器未在 Robinhood 股票 ABI 中出现；本链原子首买未证实。
 - Rabbit 创建后的一笔具体 Swap calldata 本轮 Blockscout 403，未再拆 UR 字节；编码以官方 direct 集成 + `02` UR 结构为准。

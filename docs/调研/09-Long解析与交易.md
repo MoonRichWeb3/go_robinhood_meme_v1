@@ -1,6 +1,6 @@
 # 09 Long：发射事件、买卖事件、如何解析、如何交易
 
-- 最新更新时间：2026-09-01 17:50 (UTC+8)
+- 最新更新时间：2026-09-01 21:16 (UTC+8)
 - 适用范围：Debot `launchpad=long` 的盘口（24h 金狗约 24%、出金率高于 Pons V2）；只写监听与编码口径，不含 bot 实现
 - 来源清单：
   - Blockscout 已验证合约 `LongLauncher` `src/LongLauncher.sol`：<https://robinhoodchain.blockscout.com/address/0x22e99278308B393ea1260859B181AD7E78f5eeED>
@@ -17,6 +17,8 @@
 和 Bankr / 其它 Airlock 产品的分界：**发现新盘只听 `LongLauncher` 的 `LaunchCreated`，不要把 Airlock 上每一笔 `Create` 都算 Long。** Airlock 是底层；Long 是带 24 小时 ticker 预留的产品壳。
 
 报价资产在已核样本里是 **Robinhood 股票代币**（SENDER = AMZN，ARXIV = MRNA），不是 ETH。用 ETH 直接买会路径错误，除非该笔 `numeraire` 真的是 WETH/ETH。
+
+**成交价：** exec 用 Transfer 净额比，再乘 `usd_per_1_numeraire`。动态费让 exec 偏离 sqrt；交易表用 exec。币对表刷盘见需求 `01` §3.8。sqrt 公式见下节。ARXIV 样本 `currency0=MRNA`、`currency1=ARXIV`，meme 在 token1；不要写死。
 
 ## 1. 固定合约
 
@@ -99,7 +101,7 @@ event LaunchCreated(
 | `Initialize` | PoolManager | 记下 `poolId`、`currency0/1`、`fee`、`tickSpacing`、`hooks` |
 | `Create` | Airlock | Bankr 等也会发；**不能**当 Long 过滤器 |
 | `Create` | DopplerHookInitializer | 辅助核对 asset/numeraire |
-| `FeeScheduleSet` | RehypeDopplerHookInitializer | Doppler 时段费率；v0 可进 `raw_json` |
+| `FeeScheduleSet` | RehypeDopplerHookInitializer | Doppler 时段费率；v0 **不落库**（需求禁止 `raw_json`），以后要展示再加列 |
 
 ### 2.3 已核样本
 
@@ -122,7 +124,63 @@ Long **没有** `CurveBuy`。成交在 v4：
 
 SENDER 近期成交样本：`0x8c84026f…32e7`，入口是 `RelayRouterV3` `0xb92fe925…Ff4f`，selector `0x0a2b8f36`。代币从 PoolManager 经中间合约到用户 `0xF75D21FF…611B`。聪明钱入库仍按 Transfer 归因，`router` 标实际入口（UR / GMGN / Relay 等）。
 
-## 4. 如何交易（调研口径，v0 需求不下单）
+## 4. 价格计算
+
+Long **没有** bonding 曲线。发现后立刻有 v4 池，价格算法与 `07` / `02` 的 v4 公式相同，输入换成本盘的 `numeraire` 与 `Initialize`。
+
+### spot（中间价；需求里币对表展示用最近成交 U）
+
+写库节奏见需求 `01` §3.8。下面 `Initialize`/`Swap` 的 sqrt 仍是池子中间价；**交易表用 exec**。
+
+创建交易里的 `Initialize`：
+
+| 字段 | ARXIV 样本 | 用途 |
+| --- | --- | --- |
+| `sqrtPriceX96` | 事件 data | 开盘 spot |
+| `currency0` | MRNA `0x43B07D15…` | 地址较小一侧 |
+| `currency1` | ARXIV 代币 | 地址较大一侧 |
+| `fee` | `8388608`（`0x800000` 动态费） | 不算进 spot 公式 |
+| `tickSpacing` | 8 | 不算进 spot 公式 |
+| `hooks` | DopplerHookInitializer | 只用来确认是 Doppler 池 |
+
+```text
+Q96 = 2^96
+raw = (sqrtPriceX96 / Q96)^2     # currency1 per currency0（wei）
+
+# 1 枚 meme 值多少 numeraire（人类单位）
+若 meme == currency1 且 quote == currency0：   # ARXIV / SENDER 已核形态
+    spot_quote = (1 / raw) * 10^(quoteDec - tokenDec)
+若 meme == currency0 且 quote == currency1：
+    spot_quote = raw * 10^(quoteDec - tokenDec)
+
+spot_usd = spot_quote * usd_per_1_numeraire
+```
+
+| numeraire | usd_per_1_numeraire |
+| --- | --- |
+| 股票代币（AMZN、MRNA…） | 该股 USD（喂价待实现） |
+| ETH / WETH | eth_usd |
+| USDG | 先按 1 |
+
+已核样本 token 与股票均为 18 decimals。仍要读 `decimals()`。后续成交：解析 `Swap.sqrtPriceX96` 更新 spot；`eth_call StateView.getSlot0(poolId)` 仅作缺事件时的补读。
+
+**不要**用 Doppler hook 单例上的「全局价」；必须是该 `poolId` 的 sqrt。Bankr 等共用 hook，池子不同。
+
+### exec（写交易表）
+
+```text
+# 用 meme Transfer 净额 与 quote Transfer 净额（跳过 PoolManager / hook / Router）
+exec_quote = abs(quote_human) / abs(meme_human)
+exec_usd   = exec_quote * usd_per_1_numeraire
+```
+
+探测样本 Long 买：meme 从 PM 经 Rehype hook 再到 EOA。净额取 **到达用户的最后一跳**。Swap.sender 可能是 `0x6f02324d…`（RehypeDopplerHookInitializer），不能当成交量腿。
+
+动态费 / 白名单 Router 窗口会让 exec 偏离 sqrt；**交易表和币对展示用 exec**。
+
+无成交的新盘：不刷 `price_usd`。
+
+## 5. 如何交易（调研口径，v0 需求不下单）
 
 与 o1 股票盘同类：**创建即 v4，支付 quote 代币。**
 
@@ -134,7 +192,7 @@ SENDER 近期成交样本：`0x8c84026f…32e7`，入口是 `RelayRouterV3` `0xb
 
 公开 RPC 本环境 403，未 `eth_call` `Airlock.getAssetData`。落地时可用该 view 补 timelock / governance / pool，但 **发现路径仍以 `LaunchCreated` 为准**。
 
-## 5. 和 Pons / o1 的差异（需求建模用）
+## 6. 和 Pons / o1 的差异（需求建模用）
 
 | | Pons V2 | o1 股票 | Long |
 | --- | --- | --- | --- |
@@ -146,7 +204,7 @@ SENDER 近期成交样本：`0x8c84026f…32e7`，入口是 `RelayRouterV3` `0xb
 | 创建人 | `deployer` / `tx.from` | `tx.from` + Token Deployer 合约 | `tx.from` = `LaunchCreated.launcher`；代币 owner 是 Airlock，**不要把 Airlock/LongLauncher 当聪明钱** |
 | Hook | 毕业后才是 Pons meme hook | 股票 LaunchHook 单例 | DopplerHookInitializer 单例（跨产品共用） |
 
-## 6. 显式缺口
+## 7. 显式缺口
 
 - 未逐个交叉 Debot 24h 全部 8 只 `long` 金狗；已核 SENDER（Debot 金狗）+ 同工厂 ARXIV。
 - `numeraire` 是否允许 ETH/USDG：ABI 是任意 `address`，本轮样本只有股票代币。实现时按事件存，不要写死 AMZN。

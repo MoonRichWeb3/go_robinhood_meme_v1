@@ -1,9 +1,9 @@
 # 06 Pons V2：发射事件、买卖事件、如何解析、如何交易
 
-- 最新更新时间：2026-09-01 16:30 (UTC+8)
-- 适用范围：Debot 同屏新盘（Chair / FWOBIN）所属协议；只写监听与编码口径，不含 bot 实现
+- 最新更新时间：2026-09-01 21:16 (UTC+8)
+- 适用范围：Debot 同屏新盘（Chair / FWOBIN）所属协议；只写监听、编码与**价格算法**，不含 bot 实现
 - 来源清单：
-  - 官方 <https://docs.ponsfamily.com/v2>
+  - 官方 <https://docs.ponsfamily.com/v2>（Getting a quote / getReserves）
   - Blockscout 已验证 ABI：`PonsV2LaunchAndBuy`、`PonsV2BondingCurve`
   - Chair / FWOBIN 创建交易（见 `05-Debot金狗发射台.md`）
   - topic0 由 Foundry `cast keccak` 与 Bitquery / 官方事件表交叉
@@ -11,6 +11,8 @@
 ## 结论先行
 
 Pons V2 是 **工厂 + 每币一条 bonding 曲线 + 毕业进 Uniswap v4**。新币发现听工厂 / LaunchAndBuy；内盘买卖听曲线事件（按 topic0 全链滤，不要只听工厂地址）；毕业后买卖走 Universal Router，hooks 必须是 Pons meme hook。
+
+**成交价：** 事件 `quoteIn/tokensOut` 或 `quoteOut/tokensIn`（毕业后改 Transfer 净额）。需求里交易表用这个；币对表展示用最近成交折 U，3 秒刷盘（`01` §3.8）。`getReserves()` 边际价仍可用于理解曲线，不要用 `realQuoteReserve()` 当成交价。
 
 和 Fourmeme 的对应关系：曲线 `buy` ≈ `buyTokenAMAP`；`CurveBuy` ≈ Manager Buy 事件。差别：曲线地址不固定、quote 可以是 ETH 或 USDG、开盘 5 秒有狙击税。
 
@@ -105,9 +107,84 @@ receipt.logs
 
 Chair 这类 USDG 盘：`quoteIn` 按 6 位小数；ETH 盘按 18 位。不要用 Debot 卡片上的美元金额当链上单位。
 
-## 6. 如何交易（编码口径，未下单）
+## 6. 价格计算（成交单价；币对表刷盘见需求 3.8）
 
-### 6.1 内盘买 — 对 **曲线** 调 `buy`
+链上怎么把储备/事件换成「1 枚多少 quote」如下。**落库：** 聪明钱成交价当场进 `wallet_events`；`launch_index.price_usd` 只对已监控且有成交的代币、默认 3 秒刷一次（需求 `01` §3.8）。本节公式仍可用于算出那笔成交单价。
+
+官方（<https://docs.ponsfamily.com/v2> Getting a quote）：曲线 **没有** `quote()` view。定价是常数积 + **phantom quote**。路由器按下面整数顺序重放，才能和链上成交一致。
+
+### 储备与开盘价
+
+```text
+k            = phantomQuote * totalSupply          # 创建时固定
+quoteReserve = phantomQuote + realQuoteReserve     # getReserves() 的 x，含虚储备
+tokenReserve = 曲线仍持有的 meme                   # getReserves() 的 y
+不变式        quoteReserve * tokenReserve == k
+
+getReserves()     → 用来报价、用来算 spot     （官方指定）
+realQuoteReserve()→ 曲线实际拿到的 quote      （不能当展示价）
+```
+
+边际 **spot**（展示用，不含滑点、不含手续费）：
+
+```text
+spot_wei   = quoteReserve / tokenReserve          # quote 最小单位 / token 最小单位
+spot_quote = spot_wei * 10^(tokenDec - quoteDec)  # 1 枚 meme 值多少 quote（人类单位）
+# ETH 盘 tokenDec=18, quoteDec=18 → 系数 1
+# USDG 盘 quoteDec=6 → 乘 10^12
+```
+
+开盘时 `realQuoteReserve=0`，spot = `phantomQuote / totalSupply`，所以第一笔买不是零成本（官方原文）。
+
+### 成交价 exec（写交易表）
+
+手续费打在 **quote 腿**，bps 分母 `10000`。
+
+**买：** 先从 `quoteIn` 扣 `feeBps + creatorTaxBps + snipeTaxBps`，剩余进曲线：
+
+```text
+amountOut(in, reserveIn, reserveOut) = in * reserveOut / (reserveIn + in)
+
+netIn     = quoteIn - fee - tax - snipe
+tokensOut = amountOut(netIn, quoteReserve, tokenReserve)
+# 若 tokensOut > sellableTokens：钳到可售量并退款（见官方 quoteBuy）
+
+exec_quote = quoteIn / tokensOut * 10^(tokenDec - quoteDec)
+# 用用户实付 quoteIn（含税），不是 netIn。狙击期 exec 会明显高于 spot。
+```
+
+**卖：** 先按曲线算出 gross quote，再从产出扣手续费（无狙击税）：
+
+```text
+gross      = amountOut(tokensIn, tokenReserve, quoteReserve)
+quoteOut   = gross - fee(gross) - tax(gross)
+exec_quote = quoteOut / tokensIn * 10^(tokenDec - quoteDec)
+```
+
+事件落地更省 RPC：`CurveBuy` 用 `quoteIn / tokensOut`；`CurveSell` 用 `quoteOut / tokensIn`。spot 仍应 `eth_call getReserves()`（或成交后用净流入自己维护 x、y）。call 失败则本笔 `spot_source=trade_vwap`，用 exec 顶上。
+
+### 折 USD
+
+```text
+spot_usd = spot_quote * usd_per_1_quote
+exec_usd = exec_quote * usd_per_1_quote
+```
+
+| pairToken | usd_per_1_quote |
+| --- | --- |
+| ETH `0x0` | eth_usd（喂价待实现） |
+| USDG | 先按 1 |
+| 其它已批准 quote（股票等） | 该资产 USD |
+
+狙击窗 5 秒：`currentSnipeTaxBps(recipient)` 很大时，exec 会明显高于曲线边际价；**交易表仍记实际成交 U**（含税），币对表也刷这笔成交 U。不要用 reserves 冒充用户成交价。
+
+### 毕业后
+
+`PoolGraduated` 之后曲线 revert。spot 改 `02` 的 v4 `sqrtPriceX96` 公式，`hooks=PonsV2MemeHook`。exec 改 `|Δquote|/|Δmeme|`（来自 Swap + Transfer）。
+
+## 7. 如何交易（编码口径，未下单）
+
+### 7.1 内盘买 — 对 **曲线** 调 `buy`
 
 ```text
 buy(uint256 quoteIn, uint256 minTokensOut, address recipient) payable → tokensOut
@@ -123,7 +200,7 @@ selector 0x59a87bc1
 
 `minTokensOut` 约束的是单价，接近毕业时允许部分成交 + `CurveBuyRefunded`。以事件里的 `tokensOut` 为准。
 
-### 6.2 内盘卖
+### 7.2 内盘卖
 
 ```text
 sell(uint256 tokensIn, uint256 minQuoteOut, address recipient)
@@ -132,17 +209,17 @@ selector 0xd04c6983
 
 先 `token.approve(curve, tokensIn)`。卖不受狙击税。`readyToGraduate()` 后不要再卖曲线。
 
-### 6.3 毕业后
+### 7.3 毕业后
 
 走本目录 `02` 的 Universal Router `execute`（`0x3593564c`），`PoolKey.hooks = PonsV2MemeHook`，`minHopPriceX36=0`。ETH 盘 `value=amountIn`；USDG 盘走 Permit2 / 授权 UR。
 
-### 6.4 不要做
+### 7.4 不要做
 
 - 把 `launchAndBuy` 当普通跟买（那是创建+开发者首买）。
 - 毕业后还打曲线。
 - 用 Fourmeme `buyTokenAMAP` 或未改过的 Uniswap SDK（缺 `minHopPriceX36` 会 revert）。
 
-## 7. 对照 Fourmeme
+## 8. 对照 Fourmeme
 
 | | Fourmeme | Pons V2 内盘 |
 | --- | --- | --- |
