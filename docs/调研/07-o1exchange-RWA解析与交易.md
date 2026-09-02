@@ -1,7 +1,8 @@
 # 07 o1 Launchpad（股票配对）：发射事件、买卖事件、如何解析、如何交易
 
-- 最新更新时间：2026-09-01 21:16 (UTC+8)
+- 最新更新时间：2026-09-02 14:40 (UTC+8)
 - 适用范围：Debot 本屏金狗 Rabbit（273x）所属协议；含 Robinhood 上加密货币配对孪生工厂。只调研，不实现
+- **本期落地只使用 §1.2 加密工厂。** §1.1 股票工厂文档保留，扫块 ignore，见 `docs/功能模块/04`、`05`。
 - 来源清单：
   - <https://docs.o1.exchange/launchpad/reference/production-contracts.md>
   - <https://docs.o1.exchange/launchpad/create/stock-paired-launches.md>

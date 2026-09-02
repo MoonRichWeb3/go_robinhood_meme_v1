@@ -1,0 +1,22 @@
+services:
+  robinhood-meme:
+    build:
+      context: .
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      RH_SQLITE_PATH: /data/robinhood_meme.sqlite3
+      RH_HTTP_ADDR: 0.0.0.0:8888
+    volumes:
+      - robinhood-data:/data
+    ports:
+      - "127.0.0.1:8888:8888"
+    healthcheck:
+      test: ["CMD", "/app/robinhood-meme", "-healthcheck"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+
+volumes:
+  robinhood-data:

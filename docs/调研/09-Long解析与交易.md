@@ -1,7 +1,7 @@
 # 09 Long：发射事件、买卖事件、如何解析、如何交易
 
-- 最新更新时间：2026-09-01 21:16 (UTC+8)
-- 适用范围：Debot `launchpad=long` 的盘口（24h 金狗约 24%、出金率高于 Pons V2）；只写监听与编码口径，不含 bot 实现
+- 最新更新时间：2026-09-02 14:40 (UTC+8)
+- **本期落地：** 调研保留；扫块 **不听** LongLauncher（功能模块 `06` 暂缓）。恢复时仍只认 LongLauncher，不要把全部 Airlock `Create` 算 Long。
 - 来源清单：
   - Blockscout 已验证合约 `LongLauncher` `src/LongLauncher.sol`：<https://robinhoodchain.blockscout.com/address/0x22e99278308B393ea1260859B181AD7E78f5eeED>
   - Doppler 官方 Robinhood 地址表：<https://docs.doppler.lol/reference/contract-addresses>

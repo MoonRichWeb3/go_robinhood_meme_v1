@@ -1,0 +1,8 @@
+.env
+.env.*
+data/*
+!data/.gitkeep
+*.sqlite
+*.sqlite3
+*.db
+coverage.out

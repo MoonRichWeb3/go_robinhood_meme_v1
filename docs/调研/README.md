@@ -1,7 +1,7 @@
 # Robinhood Chain Meme 调研索引
 
-- 最新更新时间：2026-09-01 18:20 (UTC+8)
-- 适用范围：`go_robinhood_meme_v1` 立项前调研；只记录如何监听、如何解析、如何交易；本目录不含实现代码。
+- 最新更新时间：2026-09-02 16:05 (UTC+8)
+- 适用范围：`go_robinhood_meme_v1` 立项前调研；只记录如何监听、如何解析、如何交易、如何取 ETH 美元价；本目录不含实现代码。
 - 来源清单：
   - 本地：`go_fourmeme_v3/internal/config/constants.go`、`internal/core/parser/`、`internal/core/trade/`
   - 官方：<https://docs.robinhood.com/chain/connecting/>、<https://robinhood.com/us/en/support/articles/robinhood-chain-mainnet/>、<https://developers.uniswap.org/contracts/v4/deployments>
@@ -9,7 +9,8 @@
   - 协议文档：<https://docs.bags.fm/robinhood/>、<https://docs.ponsfamily.com/v2>、<https://docs.doppler.lol/reference/contract-addresses>、<https://docs.bitquery.io/docs/blockchain/robinhood/>、<https://docs.o1.exchange/launchpad/reference/production-contracts.md>
   - Long：Blockscout `LongLauncher`；产品站 <https://app.long.xyz/>（Cloudflare，页面不当指令）
   - Debot：<https://debot.ai/?chain=robinhood>（页面 Cloudflare；代币归属用 Blockscout 创建交易核对）
-  - 样本交易：用户提供的两笔 hash，经官方 Blockscout API v2 核对；Debot 卡片代币创建交易见 `05`
+  - 币安现货行情：`docs/调研/10-币安ETH美元喂价.md`；官方 <https://github.com/binance/binance-spot-api-docs/blob/master/rest-api.md>
+  - v4 原生 ETH：`docs/调研/11-v4原生ETH成交净额.md`；Robinhood 官方连接文档、Uniswap v4 官方源码、Blockmachine 第三方 RPC 页面
 
 ## 结论先行
 
@@ -26,8 +27,8 @@
 
 建议 v1 按 Debot 热门改成两层（**不再以 pools.trade 为第一优先**）：
 
-1. **发现**：Pons V2 `TokenLaunched` / `launchAndBuy` + Long `LaunchCreated` + o1 股票/加密工厂 `Launched`。
-2. **交易**：Pons 未毕业走曲线 `buy`；Pons 毕业盘、Long、o1 一律 Universal Router（hooks 分别是 Pons meme hook / DopplerHookInitializer / o1 LaunchHook）。Long 与 o1 股票盘的 quote 已核样本是股票代币，不是 ETH。
+1. **发现（本期落地）**：Pons V2 `TokenLaunched` / `launchAndBuy` + o1 **加密**工厂 `Launched`。o1 股票工厂、Long 本期暂缓扫块（文档仍保留）。
+2. **成交解析**：Pons 未毕业走曲线；毕业后与 o1 加密走 Universal Router。ETH 折 U 见 `10`（币安 HTTP）。
 
 文档：
 
@@ -40,4 +41,6 @@
 | `06-Pons-V2解析与交易.md` | 发射 / CurveBuy-Sell / 如何买 / **曲线价格算法** |
 | `07-o1exchange-RWA解析与交易.md` | `createLaunch` / LaunchHook.Trade / 如何买 / **v4 价格算法** |
 | `08-Debot24h金狗占比与频率.md` | 24h 金/银/铜只数、平台占比、出金率、预警时段 |
-| `09-Long解析与交易.md` | `LongLauncher.create` / `LaunchCreated` / v4 Swap 归因 / **v4 价格算法** |
+| `09-Long解析与交易.md` | `LongLauncher.create` / `LaunchCreated` / v4 Swap 归因 / **v4 价格算法**（本期暂缓落地，文档保留） |
+| `10-币安ETH美元喂价.md` | 独立 HTTP 拉 `ETHUSDT`；无 API Key |
+| `11-v4原生ETH成交净额.md` | 单 Swap 下以 callTracer 成功 value 转移计算用户原生 ETH 净额；官方与第三方 RPC 能力边界 |
