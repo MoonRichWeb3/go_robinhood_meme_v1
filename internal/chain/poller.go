@@ -11,6 +11,7 @@ import (
 const (
 	WatermarkName               = "rh_4663"
 	maxBlockPrefetchConcurrency = 8
+	defaultRecentBlockOffset    = 10
 )
 
 type Watermark struct {
@@ -103,16 +104,20 @@ func (p *Poller) PollOnce(ctx context.Context) (uint64, error) {
 	if err != nil {
 		return 0, err
 	}
-	state := Watermark{Name: WatermarkName, LastBlock: lastBlock, LastHash: lastHash}
-	if !found {
-		state = Watermark{Name: WatermarkName, LastBlock: p.config.FromBlock, UpdatedAt: time.Now().UTC()}
-		if err = p.saveWatermark(ctx, state); err != nil {
-			return 0, err
-		}
-	}
 	head, err := p.Head(ctx)
 	if err != nil {
 		return 0, err
+	}
+	state := Watermark{Name: WatermarkName, LastBlock: lastBlock, LastHash: lastHash}
+	if !found {
+		state = Watermark{
+			Name:      WatermarkName,
+			LastBlock: resolveStartBlock(head, p.config.FromBlock),
+			UpdatedAt: time.Now().UTC(),
+		}
+		if err = p.saveWatermark(ctx, state); err != nil {
+			return 0, err
+		}
 	}
 	next := state.LastBlock + 1
 	if state.LastHash == "" {
@@ -126,6 +131,17 @@ func (p *Poller) PollOnce(ctx context.Context) (uint64, error) {
 	}
 	end := min(head, next+p.config.MaxBlocksPerTick-1)
 	return p.processRange(ctx, state, next, end)
+}
+
+// resolveStartBlock 在未保存水位且未指定固定块高时，从当前链头前十块开始。
+func resolveStartBlock(head, configured uint64) uint64 {
+	if configured != 0 {
+		return configured
+	}
+	if head <= defaultRecentBlockOffset {
+		return 0
+	}
+	return head - defaultRecentBlockOffset
 }
 
 type blockFetchResult struct {

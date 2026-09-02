@@ -85,6 +85,24 @@ func TestPollOnceDelegatesAtomicWatermarkCommit(t *testing.T) {
 	}
 }
 
+func TestResolveStartBlock(t *testing.T) {
+	tests := []struct {
+		name                   string
+		head, configured, want uint64
+	}{
+		{name: "默认取链头前十块", head: 100, configured: 0, want: 90},
+		{name: "低链头不发生下溢", head: 6, configured: 0, want: 0},
+		{name: "显式块高优先", head: 100, configured: 80, want: 80},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := resolveStartBlock(tt.head, tt.configured); got != tt.want {
+				t.Fatalf("resolveStartBlock(%d, %d)=%d，期望=%d", tt.head, tt.configured, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestPollOncePrefetchesBoundedAndProcessesInOrder(t *testing.T) {
 	client, closeServer := newPollerHeadClient(t, 12, nil)
 	defer closeServer()
