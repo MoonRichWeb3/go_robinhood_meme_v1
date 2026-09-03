@@ -68,6 +68,9 @@ func New(ctx context.Context, cfg config.Config, logger *logx.Logger) (*App, err
 	if err != nil {
 		return fail(err)
 	}
+	for _, skipped := range client.SkippedEndpoints() {
+		logger.Error(map[string]any{"类型": "RPC跳过", "RPC": skipped.RPC, "错误": skipped.Reason})
+	}
 	var traceClient *chain.Client
 	if cfg.TraceRPCURL != "" {
 		traceClient, err = chain.NewClient(ctx, cfg.TraceRPCURL, cfg.HTTPUserAgent,
@@ -123,8 +126,9 @@ func New(ctx context.Context, cfg config.Config, logger *logx.Logger) (*App, err
 	}
 	poller, err := chain.NewPoller(client, data, a.ProcessBlock, logger, chain.PollerConfig{
 		FromBlock: cfg.FromBlock, MaxBlocksPerTick: uint64(cfg.MaxBlocksPerTick),
-		LagWarn: uint64(cfg.HealthLagWarn), PollInterval: time.Duration(cfg.PollMS) * time.Millisecond,
-		FetchMode: cfg.BlockFetchMode, ReceiptMethod: cfg.ReceiptMethod,
+		LagWarn: uint64(cfg.HealthLagWarn), SkipHistoryLag: uint64(cfg.SkipHistoryLag),
+		PollInterval: time.Duration(cfg.PollMS) * time.Millisecond,
+		FetchMode:    cfg.BlockFetchMode, ReceiptMethod: cfg.ReceiptMethod,
 	})
 	if err != nil {
 		return fail(err)
@@ -175,11 +179,32 @@ func (a *App) Close() error {
 	return err
 }
 
+// RPCCount 返回启动成功连上的扫块节点数。
+func (a *App) RPCCount() int {
+	if a == nil || a.client == nil {
+		return 0
+	}
+	return a.client.EndpointCount()
+}
+
+// RPCLabels 返回脱敏后的扫块节点标签，供启动日志使用。
+func (a *App) RPCLabels() []string {
+	if a == nil || a.client == nil {
+		return nil
+	}
+	return a.client.EndpointLabels()
+}
+
 func connectChain(ctx context.Context, cfg config.Config) (*chain.Client, error) {
+	timeout := time.Duration(cfg.RPCTimeoutMS) * time.Millisecond
+	endpoints := make([]chain.RPCEndpoint, len(cfg.RPCEndpoints))
+	for i, item := range cfg.RPCEndpoints {
+		endpoints[i] = chain.RPCEndpoint{URL: item.URL, QPS: item.QPS}
+	}
 	var client *chain.Client
 	var err error
 	for attempt := 0; attempt < 3; attempt++ {
-		client, err = chain.NewClient(ctx, cfg.RPCURL, cfg.HTTPUserAgent, time.Duration(cfg.RPCTimeoutMS)*time.Millisecond, cfg.ChainID)
+		client, err = chain.NewPoolClient(ctx, endpoints, cfg.HTTPUserAgent, timeout, cfg.ChainID)
 		if err == nil {
 			return client, nil
 		}

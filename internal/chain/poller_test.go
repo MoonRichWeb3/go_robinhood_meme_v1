@@ -103,6 +103,95 @@ func TestResolveStartBlock(t *testing.T) {
 	}
 }
 
+func TestSkipHistoryStart(t *testing.T) {
+	tests := []struct {
+		name                        string
+		head, last, threshold, want uint64
+		skip                        bool
+	}{
+		{name: "落后101超过100则跳到链头-10", head: 201, last: 100, threshold: 100, want: 191, skip: true},
+		{name: "落后正好100继续补", head: 200, last: 100, threshold: 100, skip: false},
+		{name: "阈值0永不跳过", head: 500, last: 1, threshold: 0, skip: false},
+		{name: "新起点不比旧水位更前则不跳", head: 20, last: 15, threshold: 1, skip: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, skip := skipHistoryStart(tt.head, tt.last, tt.threshold)
+			if skip != tt.skip || (skip && got != tt.want) {
+				t.Fatalf("skipHistoryStart(%d,%d,%d)=%d,%v 期望 %d,%v", tt.head, tt.last, tt.threshold, got, skip, tt.want, tt.skip)
+			}
+		})
+	}
+}
+
+type pollLogFake struct {
+	fields []map[string]any
+}
+
+func (l *pollLogFake) Error(fields map[string]any) {
+	copied := make(map[string]any, len(fields))
+	for k, v := range fields {
+		copied[k] = v
+	}
+	l.fields = append(l.fields, copied)
+}
+
+func TestPollOnceSkipsHistoryWhenLagExceedsThreshold(t *testing.T) {
+	client, closeServer := newPollerHeadClient(t, 200, nil)
+	defer closeServer()
+	state := &watermarkStoreFake{block: 50, hash: testBlockHash(50)}
+	logger := &pollLogFake{}
+	var processed []uint64
+	poller := &Poller{
+		client: client, state: state, logger: logger,
+		fetch: func(_ context.Context, number uint64) (BlockBatch, error) {
+			processed = append(processed, number)
+			return testBlock(number), nil
+		},
+		process: func(context.Context, BlockBatch, Watermark) error { return nil },
+		config:  PollerConfig{MaxBlocksPerTick: 2, PollInterval: time.Second, SkipHistoryLag: 100, LagWarn: 50},
+	}
+	count, err := poller.PollOnce(t.Context())
+	if err != nil || count != 2 {
+		t.Fatalf("PollOnce=%d err=%v", count, err)
+	}
+	if state.saves != 1 || state.savedBlock != 190 || state.savedHash != "" {
+		t.Fatalf("跳过历史未改水位: %+v", state)
+	}
+	if fmt.Sprint(processed) != "[190 191]" {
+		t.Fatalf("应从链头-10开始而不是补 51: %v", processed)
+	}
+	if len(logger.fields) != 1 || logger.fields[0]["类型"] != "跳过历史" {
+		t.Fatalf("应打跳过历史: %+v", logger.fields)
+	}
+}
+
+func TestPollOnceDoesNotSkipWhenLagEqualsThreshold(t *testing.T) {
+	client, closeServer := newPollerHeadClient(t, 150, nil)
+	defer closeServer()
+	state := &watermarkStoreFake{block: 50, hash: testBlockHash(50)}
+	var processed []uint64
+	poller := &Poller{
+		client: client, state: state,
+		fetch: func(_ context.Context, number uint64) (BlockBatch, error) {
+			processed = append(processed, number)
+			return testBlock(number), nil
+		},
+		process: func(context.Context, BlockBatch, Watermark) error { return nil },
+		config:  PollerConfig{MaxBlocksPerTick: 2, PollInterval: time.Second, SkipHistoryLag: 100},
+	}
+	count, err := poller.PollOnce(t.Context())
+	if err != nil || count != 2 {
+		t.Fatalf("PollOnce=%d err=%v", count, err)
+	}
+	if state.saves != 0 {
+		t.Fatalf("未超过阈值不应改水位: %+v", state)
+	}
+	if fmt.Sprint(processed) != "[51 52]" {
+		t.Fatalf("应继续补历史: %v", processed)
+	}
+}
+
 func TestPollOncePrefetchesBoundedAndProcessesInOrder(t *testing.T) {
 	client, closeServer := newPollerHeadClient(t, 12, nil)
 	defer closeServer()

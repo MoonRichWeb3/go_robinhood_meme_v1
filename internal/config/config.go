@@ -16,7 +16,8 @@ import (
 // Config 汇总 v0 进程全部环境变量；业务公式不属于配置。
 type Config struct {
 	RPCURL, TraceRPCURL, HTTPUserAgent, SQLitePath, LogLevel, LogDir string
-	BlockFetchMode, ReceiptMethod                                    string
+	RPCEndpointsFile, BlockFetchMode, ReceiptMethod                  string
+	RPCEndpoints                                                     []RPCEndpoint
 	BinanceBaseURL, BinanceETHSymbol                                 string
 	FromBlock, ChainID                                               uint64
 	PollMS, MaxBlocksPerTick, RPCTimeoutMS, TraceTimeoutMS           int
@@ -25,7 +26,7 @@ type Config struct {
 	DirtyTokenCap, ETHUSDPollSec, BinanceTimeoutMS                   int
 	ETHUSDTTLSec, ETHUSDStaleSec                                     int
 	EventRetentionDays, EventPurgeIntervalSec, EventPurgeBatch       int
-	EventPurgeSleepMS, EventPurgeMaxPerRun                           int
+	EventPurgeSleepMS, EventPurgeMaxPerRun, SkipHistoryLag           int
 	Rest                                                             rest.RestConf
 }
 
@@ -33,6 +34,7 @@ type Config struct {
 func Load() (Config, error) {
 	var c Config
 	c.RPCURL = strings.TrimSpace(os.Getenv("RH_RPC_URL"))
+	c.RPCEndpointsFile = strings.TrimSpace(os.Getenv("RH_RPC_ENDPOINTS_FILE"))
 	c.TraceRPCURL = strings.TrimSpace(os.Getenv("RH_TRACE_RPC_URL"))
 	c.HTTPUserAgent = envString("RH_HTTP_UA", "go-robinhood-meme/v0")
 	c.SQLitePath = envString("RH_SQLITE_PATH", "/data/robinhood_meme.sqlite3")
@@ -74,6 +76,13 @@ func Load() (Config, error) {
 	if err = c.setHTTP(envString("RH_HTTP_ADDR", "127.0.0.1:8888")); err != nil {
 		return c, err
 	}
+	loaded, err := loadRPCEndpoints(c.RPCURL, c.RPCEndpointsFile)
+	if err != nil {
+		return c, err
+	}
+	c.RPCEndpoints = loaded.Endpoints
+	c.RPCEndpointsFile = loaded.Path
+	c.SkipHistoryLag = loaded.SkipHistoryLag
 	if err = c.Validate(); err != nil {
 		return c, err
 	}
@@ -82,11 +91,14 @@ func Load() (Config, error) {
 
 // Validate 检查必填项、正数间隔及文档定义的安全上限。
 func (c Config) Validate() error {
-	if c.RPCURL == "" {
-		return fmt.Errorf("RH_RPC_URL 不能为空")
+	if len(c.RPCEndpoints) == 0 {
+		return fmt.Errorf("扫块 RPC 节点池不能为空")
 	}
 	if c.ChainID == 0 {
 		return fmt.Errorf("RH_CHAIN_ID 必须大于 0")
+	}
+	if c.SkipHistoryLag < 0 {
+		return fmt.Errorf("skip_history_lag 不能为负数")
 	}
 	positive := map[string]int{"RH_POLL_MS": c.PollMS, "RH_MAX_BLOCKS_PER_TICK": c.MaxBlocksPerTick, "RH_RPC_TIMEOUT_MS": c.RPCTimeoutMS,
 		"RH_TRACE_TIMEOUT_MS":   c.TraceTimeoutMS,

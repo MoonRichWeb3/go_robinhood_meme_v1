@@ -11,7 +11,7 @@ go mod download
 go test ./internal/domain ./internal/store ./internal/config ./internal/logx
 ```
 
-运行配置只来自环境变量。`RH_RPC_URL` 必填；常用本地覆盖为：
+运行配置来自环境变量和 `configs/rpcs.json`。无 JSON 时 `RH_RPC_URL` 仍可回退为单节点；常用本地覆盖为：
 
 ```bash
 export RH_RPC_URL='https://your-rpc.example'

@@ -1,6 +1,6 @@
 # 17 配置启动与 Docker
 
-- 最新更新时间：2026-09-03 11:45 (UTC+8)
+- 最新更新时间：2026-09-03 15:55 (UTC+8)
 - 适用范围：`cmd/`、`internal/config`、镜像与 compose
 - 来源：架构 §6、§8；底稿 §7.4、§8；调研 `01`（RPC/UA）、`11`（trace RPC）
 - 对应需求：非功能部署；密钥不进镜像
@@ -22,7 +22,10 @@
 
 | 变量 | 必填 | 默认 | 含义 |
 | --- | --- | --- | --- |
-| `RH_RPC_URL` | 是 | — | HTTP RPC；密钥只出现在 env |
+| `RH_RPC_URL` | 否 | — | 无节点池 JSON 时的回退单 RPC |
+| `RH_RPC_ENDPOINTS_FILE` | 否 | `configs/rpcs.json` | `{skip_history_lag, rpcs:[{rpc,qps}]}`；Alchemy 用 `${RH_ALCHEMY_RPC_URL}` 展开 |
+| `RH_SKIP_HISTORY_LAG` | 否 | JSON/`100` | 覆盖 JSON 的 `skip_history_lag`；落后超过则跳到链头-10；`0` 表示始终补历史 |
+| `RH_ALCHEMY_RPC_URL` | 否 | 空则跳过该条 | Alchemy HTTP URL，密钥只出现在 env |
 | `RH_FROM_BLOCK` | 否 | `0` | 仅无水位时使用；`0` 表示动态从当前链头前 10 块开始，非零表示固定起始块 |
 | `RH_CHAIN_ID` | 否 | `4663` | 与节点不符则退出 |
 | `RH_POLL_MS` | 否 | `80` | 见模块 `01` |
@@ -56,14 +59,14 @@
 | `RH_EVENT_PURGE_SLEEP_MS` | 否 | `100` | 批次间隔 |
 | `RH_EVENT_PURGE_MAX_PER_RUN` | 否 | `5000` | 单轮最多删除行数 |
 
-校验：`WALLET_RELOAD_MS > 1000` 拒绝启动（需求 ≤1s）。`PRICE_FLUSH_SEC < 1` 拒绝。空 `RH_RPC_URL` 拒绝。`RH_EVENT_RETENTION_DAYS < 1` 拒绝。`RH_EVENT_PURGE_BATCH < 1` 或 `> 5000` 拒绝。`RH_LOG_DIR` 非空时必须是绝对路径，打不开则拒绝启动。`RH_BLOCK_FETCH_MODE` 仅 `batch`/`pair`。`RH_RECEIPT_METHOD` 仅 `eth_getBlockReceipts`/`alchemy_getTransactionReceipts`。
+校验：`WALLET_RELOAD_MS > 1000` 拒绝启动（需求 ≤1s）。`PRICE_FLUSH_SEC < 1` 拒绝。节点池展开后为空且无 `RH_RPC_URL` 拒绝。`RH_EVENT_RETENTION_DAYS < 1` 拒绝。`RH_EVENT_PURGE_BATCH < 1` 或 `> 5000` 拒绝。`RH_LOG_DIR` 非空时必须是绝对路径，打不开则拒绝启动。`RH_BLOCK_FETCH_MODE` 仅 `batch`/`pair`。`RH_RECEIPT_METHOD` 仅 `eth_getBlockReceipts`/`alchemy_getTransactionReceipts`。JSON 每条 `qps` 必须在 1..1000。`skip_history_lag` / `RH_SKIP_HISTORY_LAG` 不能为负。
 
 ## 启动顺序
 
 1. 解析 config。
 2. 打开 SQLite，跑迁移。
 3. 加载合约目录并校验必填地址。
-4. 主 RPC `eth_chainId` 核对；`RH_TRACE_RPC_URL` 非空时另建客户端并独立核对 chainId，错误则拒绝启动；为空则安全禁用原生 ETH 净额。
+4. 主 RPC 节点池逐条 `eth_chainId` 核对，失败的跳过并打 `[错误]` 类型=RPC跳过；至少一条成功才能继续。`RH_TRACE_RPC_URL` 非空时另建客户端并独立核对 chainId，错误则拒绝启动；为空则安全禁用原生 ETH 净额。
 5. 从 `launch_*` 重建池/曲线登记。
 6. 加载名单快照（允许空表）。
 7. 启动 writer 队列。
@@ -77,8 +80,8 @@ HTTP 挂了不应停扫块；扫块挂了进程退出（否则健康检查撒谎
 ## Docker
 
 ```text
-镜像：仅二进制 + migrations SQL
-挂载：robinhood-data → /data；./logs → /logs
+镜像：仅二进制 + migrations SQL + configs/rpcs.json
+挂载：robinhood-data → /data；./logs → /logs；./configs → /app/configs
 用户：非 root 建议
 不 COPY .env
 ```
@@ -87,11 +90,11 @@ compose 用 `env_file`（不入库）。健康检查：`GET /health` 或进程�
 
 公开 RPC 403：文档写明加 UA；生产供应商 URL。
 
-当前 `.env` 的主 RPC 是 Robinhood 官方公开端点；trace RPC 是 Blockmachine 第三方无密钥公开端点。代码和日志不得落 raw trace、完整 RPC URL 查询参数或密钥。第三方 trace 失败只使对应成交 quote/U 为 NULL，不中断扫块与水位。
+当前扫块走 `configs/rpcs.json` 节点池（Alchemy 10qps，其余公开节点 1qps；`skip_history_lag` 默认 100）。`.env` 的 `RH_ALCHEMY_RPC_URL` 只用于 JSON 展开。trace RPC 仍是 Blockmachine 第三方无密钥公开端点。代码和日志不得落 raw trace、完整 RPC URL 查询参数或密钥。第三方 trace 失败只使对应成交 quote/U 为 NULL，不中断扫块与水位。
 
 ## 日志
 
-启动成功打一行中文：RPC 已连接（不要打印完整 URL 中的密钥；脱敏 query）。`[错误]` 启动失败原因。`RH_LOG_DIR` 无法创建或打开时拒绝启动。
+启动成功打一行中文：RPC 已连接（RPC数、脱敏后的 RPC 列表）。`[错误]` 启动失败原因。429 打类型=RPC限流 且带具体 RPC。`RH_LOG_DIR` 无法创建或打开时拒绝启动。
 
 ## 失败
 
@@ -103,7 +106,7 @@ chainId 错误、目录缺地址、迁移失败 → 退出。RPC 瞬时失败允
 
 ## 验收
 
-- 无 RPC 起不来。
+- 无可用扫块 RPC 起不来。
 - 卷上重启 AC-07。
 - 镜像层不含密钥文件。
 - `WALLET_RELOAD_MS=5000` 起不来。

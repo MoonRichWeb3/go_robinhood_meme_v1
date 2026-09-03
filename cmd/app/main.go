@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -51,7 +52,7 @@ func main() {
 		logger.Error(map[string]any{"类型": "启动失败", "错误": err})
 		os.Exit(1)
 	}
-	logger.Info("启动", map[string]any{"类型": "RPC已连接", "链ID": cfg.ChainID, "HTTP": cfg.Rest.Host})
+	logger.Info("启动", map[string]any{"类型": "RPC已连接", "链ID": cfg.ChainID, "HTTP": cfg.Rest.Host, "RPC数": application.RPCCount(), "RPC": strings.Join(application.RPCLabels(), ",")})
 	if err = application.Run(ctx); err != nil {
 		logger.Error(map[string]any{"类型": "扫块退出", "错误": err})
 	}

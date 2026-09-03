@@ -32,9 +32,9 @@ type PollLogger interface {
 }
 
 type PollerConfig struct {
-	FromBlock, MaxBlocksPerTick, LagWarn uint64
-	PollInterval                         time.Duration
-	FetchMode, ReceiptMethod             string
+	FromBlock, MaxBlocksPerTick, LagWarn, SkipHistoryLag uint64
+	PollInterval                                         time.Duration
+	FetchMode, ReceiptMethod                             string
 }
 
 type Poller struct {
@@ -94,7 +94,7 @@ func (p *Poller) Run(ctx context.Context) error {
 		processed, err := p.PollOnce(ctx)
 		if err != nil {
 			if p.logger != nil {
-				p.logger.Error(map[string]any{"类型": "扫块失败", "错误": err})
+				p.logger.Error(rpcFailureFields(err))
 			}
 			if err = sleepContext(ctx, backoff); err != nil {
 				return err
@@ -122,11 +122,23 @@ func (p *Poller) PollOnce(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	state := Watermark{Name: WatermarkName, LastBlock: lastBlock, LastHash: lastHash}
+	skippedHistory := false
 	if !found {
 		state = Watermark{
 			Name:      WatermarkName,
 			LastBlock: resolveStartBlock(head, p.config.FromBlock),
 			UpdatedAt: time.Now().UTC(),
+		}
+		if err = p.saveWatermark(ctx, state); err != nil {
+			return 0, err
+		}
+	} else if start, skip := skipHistoryStart(head, lastBlock, p.config.SkipHistoryLag); skip {
+		skippedHistory = true
+		state = Watermark{Name: WatermarkName, LastBlock: start, UpdatedAt: time.Now().UTC()}
+		if p.logger != nil {
+			p.logger.Error(map[string]any{
+				"类型": "跳过历史", "已处理块": lastBlock, "链头": head, "新起点": start, "阈值": p.config.SkipHistoryLag,
+			})
 		}
 		if err = p.saveWatermark(ctx, state); err != nil {
 			return 0, err
@@ -139,7 +151,7 @@ func (p *Poller) PollOnce(ctx context.Context) (uint64, error) {
 	if next > head {
 		return 0, nil
 	}
-	if p.logger != nil && head-next+1 > p.config.LagWarn {
+	if !skippedHistory && p.logger != nil && head-next+1 > p.config.LagWarn {
 		p.logger.Error(map[string]any{"类型": "落后", "已处理块": state.LastBlock, "链头": head})
 	}
 	end := min(head, next+p.config.MaxBlocksPerTick-1)
@@ -155,6 +167,21 @@ func resolveStartBlock(head, configured uint64) uint64 {
 		return 0
 	}
 	return head - defaultRecentBlockOffset
+}
+
+// skipHistoryStart 在已有水位落后超过阈值时，改从当前链头前十块开始，不再补中间历史。
+func skipHistoryStart(head, lastBlock, threshold uint64) (uint64, bool) {
+	if threshold == 0 || head <= lastBlock {
+		return 0, false
+	}
+	if head-lastBlock <= threshold {
+		return 0, false
+	}
+	start := resolveStartBlock(head, 0)
+	if start <= lastBlock {
+		return 0, false
+	}
+	return start, true
 }
 
 type blockFetchResult struct {
@@ -247,6 +274,20 @@ func (p *Poller) Head(ctx context.Context) (uint64, error) {
 		return 0, err
 	}
 	return parseHexUint64(result)
+}
+
+func rpcFailureFields(err error) map[string]any {
+	fields := map[string]any{"类型": "扫块失败", "错误": err}
+	endpoint, ok := AsEndpointError(err)
+	if !ok {
+		return fields
+	}
+	fields["RPC"] = endpoint.RPC
+	if endpoint.Status == 429 {
+		fields["类型"] = "RPC限流"
+		fields["状态"] = 429
+	}
+	return fields
 }
 
 func sleepContext(ctx context.Context, delay time.Duration) error {

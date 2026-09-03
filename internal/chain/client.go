@@ -26,8 +26,11 @@ const maxRPCResponseBytes = 64 << 20
 // Client 是带固定 User-Agent 和请求超时的 HTTP JSON-RPC 客户端。
 type Client struct {
 	endpoint  string
+	label     string
 	userAgent string
 	http      *http.Client
+	pool      *rpcPool
+	skipped   []SkippedRPC
 	nextID    atomic.Uint64
 }
 
@@ -71,7 +74,7 @@ func NewClient(ctx context.Context, endpoint, userAgent string, timeout time.Dur
 	if timeout <= 0 {
 		return nil, fmt.Errorf("RPC timeout 必须大于 0")
 	}
-	c := &Client{endpoint: u.String(), userAgent: userAgent, http: &http.Client{Timeout: timeout}}
+	c := &Client{endpoint: u.String(), label: RedactRPCURL(u.String()), userAgent: userAgent, http: &http.Client{Timeout: timeout}}
 	var chainID string
 	if err = c.Call(ctx, "eth_chainId", []any{}, &chainID); err != nil {
 		return nil, fmt.Errorf("读取 chainId: %w", err)
@@ -116,13 +119,19 @@ func (c *Client) CallBatch(ctx context.Context, calls []BatchCall, outs []any) e
 	if err != nil {
 		return err
 	}
-	raw, err := c.post(ctx, body, maxRPCResponseBytes)
+	raw, member, err := c.post(ctx, body, maxRPCResponseBytes)
 	if err != nil {
 		return err
 	}
 	raw = bytes.TrimSpace(raw)
+	if isRateLimitedBody(raw) {
+		if c.pool != nil {
+			c.pool.penalize(member)
+		}
+		return wrapEndpointError(member, http.StatusTooManyRequests, fmt.Errorf("RPC HTTP 状态 %d", http.StatusTooManyRequests))
+	}
 	if len(raw) == 0 {
-		return fmt.Errorf("解码 RPC 批量响应: 空响应")
+		return wrapEndpointError(member, 0, fmt.Errorf("解码 RPC 批量响应: 空响应"))
 	}
 	if raw[0] == '{' {
 		var envelope rpcResponse
@@ -130,9 +139,9 @@ func (c *Client) CallBatch(ctx context.Context, calls []BatchCall, outs []any) e
 			return fmt.Errorf("解码 RPC 批量响应: %w", err)
 		}
 		if envelope.Error != nil {
-			return envelope.Error
+			return annotateRPCError(c.pool, member, envelope.Error)
 		}
-		return fmt.Errorf("RPC 批量响应必须是数组")
+		return wrapEndpointError(member, 0, fmt.Errorf("RPC 批量响应必须是数组"))
 	}
 	var envelopes []rpcResponse
 	if err = json.Unmarshal(raw, &envelopes); err != nil {
@@ -154,7 +163,7 @@ func (c *Client) CallBatch(ctx context.Context, calls []BatchCall, outs []any) e
 			return fmt.Errorf("RPC 响应 id 不匹配: 期望=%d", id)
 		}
 		if envelope.Error != nil {
-			return envelope.Error
+			return annotateRPCError(c.pool, member, envelope.Error)
 		}
 		if string(envelope.Result) == "null" {
 			return fmt.Errorf("RPC %s 返回 null", calls[i].Method)
@@ -176,19 +185,25 @@ func (c *Client) call(ctx context.Context, method string, params any, out any, r
 	if err != nil {
 		return err
 	}
-	raw, err := c.post(ctx, body, responseLimit)
+	raw, member, err := c.post(ctx, body, responseLimit)
 	if err != nil {
 		return err
 	}
+	if isRateLimitedBody(raw) {
+		if c.pool != nil {
+			c.pool.penalize(member)
+		}
+		return wrapEndpointError(member, http.StatusTooManyRequests, fmt.Errorf("RPC HTTP 状态 %d", http.StatusTooManyRequests))
+	}
 	var envelope rpcResponse
 	if err = json.Unmarshal(raw, &envelope); err != nil {
-		return fmt.Errorf("解码 RPC 响应: %w", err)
+		return wrapEndpointError(member, 0, fmt.Errorf("解码 RPC 响应: %w", err))
 	}
 	if envelope.ID != id {
-		return fmt.Errorf("RPC 响应 id 不匹配: 期望=%d 实际=%d", id, envelope.ID)
+		return wrapEndpointError(member, 0, fmt.Errorf("RPC 响应 id 不匹配: 期望=%d 实际=%d", id, envelope.ID))
 	}
 	if envelope.Error != nil {
-		return envelope.Error
+		return annotateRPCError(c.pool, member, envelope.Error)
 	}
 	if string(envelope.Result) == "null" {
 		return fmt.Errorf("RPC %s 返回 null", method)
@@ -199,40 +214,60 @@ func (c *Client) call(ctx context.Context, method string, params any, out any, r
 	return json.Unmarshal(envelope.Result, out)
 }
 
-func (c *Client) post(ctx context.Context, body []byte, responseLimit int64) ([]byte, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+func (c *Client) post(ctx context.Context, body []byte, responseLimit int64) ([]byte, *rpcMember, error) {
+	member, err := c.acquire(ctx)
 	if err != nil {
-		return nil, err
+		return nil, member, err
+	}
+	if member.label == "" {
+		member.label = RedactRPCURL(member.url)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, member.url, bytes.NewReader(body))
+	if err != nil {
+		return nil, member, wrapEndpointError(member, 0, err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("User-Agent", c.userAgent)
 	resp, err := c.http.Do(req)
 	if err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return nil, ctxErr
+			return nil, member, ctxErr
 		}
 		var netErr net.Error
 		if errors.As(err, &netErr) && netErr.Timeout() {
-			return nil, fmt.Errorf("RPC HTTP 请求超时")
+			return nil, member, wrapEndpointError(member, 0, fmt.Errorf("RPC HTTP 请求超时"))
 		}
-		return nil, fmt.Errorf("RPC HTTP 请求失败")
+		return nil, member, wrapEndpointError(member, 0, fmt.Errorf("RPC HTTP 请求失败"))
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return nil, fmt.Errorf("RPC HTTP 状态 %d", resp.StatusCode)
+		if resp.StatusCode == http.StatusTooManyRequests && c.pool != nil {
+			c.pool.penalize(member)
+		}
+		return nil, member, wrapEndpointError(member, resp.StatusCode, fmt.Errorf("RPC HTTP 状态 %d", resp.StatusCode))
 	}
 	if responseLimit < 1 {
-		return nil, fmt.Errorf("RPC 响应上限必须大于 0")
+		return nil, member, wrapEndpointError(member, 0, fmt.Errorf("RPC 响应上限必须大于 0"))
 	}
 	raw, err := io.ReadAll(io.LimitReader(resp.Body, responseLimit+1))
 	if err != nil {
-		return nil, fmt.Errorf("读取 RPC 响应: %w", err)
+		return nil, member, wrapEndpointError(member, 0, fmt.Errorf("读取 RPC 响应: %w", err))
 	}
 	if int64(len(raw)) > responseLimit {
-		return nil, fmt.Errorf("RPC 响应超过 %d 字节上限", responseLimit)
+		return nil, member, wrapEndpointError(member, 0, fmt.Errorf("RPC 响应超过 %d 字节上限", responseLimit))
 	}
-	return raw, nil
+	return raw, member, nil
+}
+
+func annotateRPCError(pool *rpcPool, member *rpcMember, err *rpcError) error {
+	if rpcErrorRateLimited(err) {
+		if pool != nil {
+			pool.penalize(member)
+		}
+		return wrapEndpointError(member, http.StatusTooManyRequests, err)
+	}
+	return wrapEndpointError(member, 0, err)
 }
 
 // BlockNumber 返回当前链头高度。

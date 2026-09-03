@@ -1,0 +1,33 @@
+{
+  "skip_history_lag": 100,
+  "rpcs": [
+    {
+      "rpc": "${RH_ALCHEMY_RPC_URL}",
+      "qps": 10
+    },
+    {
+      "rpc": "https://rpc.mainnet.chain.robinhood.com",
+      "qps": 1
+    },
+    {
+      "rpc": "https://robinhood.rpc.blxrbdn.com",
+      "qps": 1
+    },
+    {
+      "rpc": "https://robinhood-rpc.publicnode.com",
+      "qps": 1
+    },
+    {
+      "rpc": "https://robinhood.api.pocket.network",
+      "qps": 1
+    },
+    {
+      "rpc": "https://rpc.nodeflare.app/robinhood/public",
+      "qps": 1
+    },
+    {
+      "rpc": "https://rpc-robinhood.blockmachine.io",
+      "qps": 1
+    }
+  ]
+}

@@ -22,6 +22,7 @@ services:
     volumes:
       - robinhood-data:/data
       - ./logs:/logs
+      - ./configs:/app/configs:ro
     ports:
       - "127.0.0.1:8888:8888"
     healthcheck:
