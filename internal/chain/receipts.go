@@ -4,6 +4,7 @@ package chain
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"math/big"
 	"strings"
@@ -11,7 +12,17 @@ import (
 	"time"
 )
 
-const maxReceiptConcurrency = 8
+const (
+	maxReceiptConcurrency = 8
+	// ReceiptMethodEthBlock 是标准按块整包收据接口。
+	ReceiptMethodEthBlock = "eth_getBlockReceipts"
+	// ReceiptMethodAlchemy 是 Alchemy 按块整包收据接口。
+	ReceiptMethodAlchemy = "alchemy_getTransactionReceipts"
+	// FetchModeBatch 把块详情与整块收据合并为一次 HTTP JSON-RPC 批量。
+	FetchModeBatch = "batch"
+	// FetchModePair 保留双 HTTP 并行：eth_getBlockByNumber + 整块收据。
+	FetchModePair = "pair"
+)
 
 // Transaction 保留归因和 ABI 解码所需的完整交易输入。
 type Transaction struct {
@@ -72,11 +83,38 @@ type rawReceipt struct {
 // ReceiptFetcher 在 Probe 后永久固定整块或逐笔模式。
 type ReceiptFetcher struct {
 	client      *Client
+	method      string
+	batch       bool
 	probed      bool
 	blockMethod bool
 }
 
-func NewReceiptFetcher(client *Client) *ReceiptFetcher { return &ReceiptFetcher{client: client} }
+func NewReceiptFetcher(client *Client) *ReceiptFetcher {
+	return NewReceiptFetcherMode(client, ReceiptMethodEthBlock, true)
+}
+
+// NewReceiptFetcherMode 按配置选择收据接口与 HTTP 批量/双请求模式。
+func NewReceiptFetcherMode(client *Client, method string, batch bool) *ReceiptFetcher {
+	if method == "" {
+		method = ReceiptMethodEthBlock
+	}
+	return &ReceiptFetcher{client: client, method: method, batch: batch}
+}
+
+func (f *ReceiptFetcher) receiptMethod() string {
+	if f.method == "" {
+		return ReceiptMethodEthBlock
+	}
+	return f.method
+}
+
+func (f *ReceiptFetcher) receiptParams(blockNumber uint64) []any {
+	qty := hexQuantity(blockNumber)
+	if f.receiptMethod() == ReceiptMethodAlchemy {
+		return []any{map[string]string{"blockNumber": qty}}
+	}
+	return []any{qty}
+}
 
 // Probe 对一个已存在块仅探测一次；任何失败都会固定回退，不会逐块来回切换。
 func (f *ReceiptFetcher) Probe(ctx context.Context, blockNumber uint64) (bool, error) {
@@ -84,8 +122,7 @@ func (f *ReceiptFetcher) Probe(ctx context.Context, blockNumber uint64) (bool, e
 		return f.blockMethod, nil
 	}
 	f.probed = true
-	var rows []rawReceipt
-	err := f.client.Call(ctx, "eth_getBlockReceipts", []any{hexQuantity(blockNumber)}, &rows)
+	_, err := f.loadReceipts(ctx, blockNumber)
 	if err != nil {
 		f.blockMethod = false
 		return false, nil
@@ -121,19 +158,47 @@ func (f *ReceiptFetcher) FetchBlock(ctx context.Context, number uint64) (BlockBa
 	return block, nil
 }
 
-// fetchWithBlockReceipts 并行读取块详情和整块收据；任一请求失败会取消另一请求。
+func (f *ReceiptFetcher) loadReceipts(ctx context.Context, number uint64) ([]rawReceipt, error) {
+	var raw json.RawMessage
+	if err := f.client.Call(ctx, f.receiptMethod(), f.receiptParams(number), &raw); err != nil {
+		return nil, err
+	}
+	return unmarshalReceiptRows(raw)
+}
+
+// fetchWithBlockReceipts 读取块详情和整块收据；默认一次 HTTP 批量，pair 模式保留双请求并行。
 func (f *ReceiptFetcher) fetchWithBlockReceipts(ctx context.Context, number uint64) (BlockBatch, error) {
+	if f.batch {
+		return f.fetchWithBatch(ctx, number)
+	}
+	return f.fetchWithPair(ctx, number)
+}
+
+func (f *ReceiptFetcher) fetchWithBatch(ctx context.Context, number uint64) (BlockBatch, error) {
+	var raw rawBlock
+	var receiptRaw json.RawMessage
+	err := f.client.CallBatch(ctx, []BatchCall{
+		{Method: "eth_getBlockByNumber", Params: []any{hexQuantity(number), true}},
+		{Method: f.receiptMethod(), Params: f.receiptParams(number)},
+	}, []any{&raw, &receiptRaw})
+	if err != nil {
+		return BlockBatch{}, err
+	}
+	return f.assembleBlock(number, raw, receiptRaw)
+}
+
+func (f *ReceiptFetcher) fetchWithPair(ctx context.Context, number uint64) (BlockBatch, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
 	var raw rawBlock
-	var rows []rawReceipt
+	var receiptRaw json.RawMessage
 	errs := make(chan error, 2)
 	go func() {
 		errs <- f.client.Call(ctx, "eth_getBlockByNumber", []any{hexQuantity(number), true}, &raw)
 	}()
 	go func() {
-		errs <- f.client.Call(ctx, "eth_getBlockReceipts", []any{hexQuantity(number)}, &rows)
+		errs <- f.client.Call(ctx, f.receiptMethod(), f.receiptParams(number), &receiptRaw)
 	}()
 	var firstErr error
 	for range 2 {
@@ -145,7 +210,10 @@ func (f *ReceiptFetcher) fetchWithBlockReceipts(ctx context.Context, number uint
 	if firstErr != nil {
 		return BlockBatch{}, firstErr
 	}
+	return f.assembleBlock(number, raw, receiptRaw)
+}
 
+func (f *ReceiptFetcher) assembleBlock(number uint64, raw rawBlock, receiptRaw json.RawMessage) (BlockBatch, error) {
 	block, err := decodeBlock(raw)
 	if err != nil {
 		return BlockBatch{}, err
@@ -153,12 +221,51 @@ func (f *ReceiptFetcher) fetchWithBlockReceipts(ctx context.Context, number uint
 	if block.Number != number {
 		return BlockBatch{}, fmt.Errorf("RPC 返回错误块高: 期望=%d 实际=%d", number, block.Number)
 	}
+	rows, err := unmarshalReceiptRows(receiptRaw)
+	if err != nil {
+		return BlockBatch{}, err
+	}
 	receipts, err := alignReceipts(rows, block.Transactions, block.Hash)
 	if err != nil {
 		return BlockBatch{}, err
 	}
 	block.Receipts = receipts
 	return block, nil
+}
+
+func unmarshalReceiptRows(raw json.RawMessage) ([]rawReceipt, error) {
+	raw = bytesTrimJSON(raw)
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, fmt.Errorf("整块收据返回 null")
+	}
+	if raw[0] == '[' {
+		var rows []rawReceipt
+		if err := json.Unmarshal(raw, &rows); err != nil {
+			return nil, fmt.Errorf("解码整块收据: %w", err)
+		}
+		return rows, nil
+	}
+	var wrapped struct {
+		Receipts []rawReceipt `json:"receipts"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err != nil {
+		return nil, fmt.Errorf("解码整块收据: %w", err)
+	}
+	if wrapped.Receipts == nil {
+		return nil, fmt.Errorf("整块收据缺少 receipts")
+	}
+	return wrapped.Receipts, nil
+}
+
+func bytesTrimJSON(raw json.RawMessage) json.RawMessage {
+	i, j := 0, len(raw)
+	for i < j && (raw[i] == ' ' || raw[i] == '\n' || raw[i] == '\r' || raw[i] == '\t') {
+		i++
+	}
+	for j > i && (raw[j-1] == ' ' || raw[j-1] == '\n' || raw[j-1] == '\r' || raw[j-1] == '\t') {
+		j--
+	}
+	return raw[i:j]
 }
 
 func (f *ReceiptFetcher) fetchIndividually(ctx context.Context, txs []Transaction, blockHash string) ([]Receipt, error) {

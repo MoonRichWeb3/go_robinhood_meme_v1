@@ -1,6 +1,6 @@
 # 17 配置启动与 Docker
 
-- 最新更新时间：2026-09-03 10:55 (UTC+8)
+- 最新更新时间：2026-09-03 11:45 (UTC+8)
 - 适用范围：`cmd/`、`internal/config`、镜像与 compose
 - 来源：架构 §6、§8；底稿 §7.4、§8；调研 `01`（RPC/UA）、`11`（trace RPC）
 - 对应需求：非功能部署；密钥不进镜像
@@ -29,6 +29,8 @@
 | `RH_MAX_BLOCKS_PER_TICK` | 否 | `10` | 见模块 `01` |
 | `RH_HTTP_UA` | 否 | 产品名+版本 | 公开 RPC 需要 |
 | `RH_RPC_TIMEOUT_MS` | 否 | `8000` | |
+| `RH_BLOCK_FETCH_MODE` | 否 | `batch` | `batch` 一次 HTTP JSON-RPC 批量；`pair` 双 HTTP 并行 |
+| `RH_RECEIPT_METHOD` | 否 | `eth_getBlockReceipts` | 整块收据；可选 `alchemy_getTransactionReceipts` |
 | `RH_TRACE_RPC_URL` | 否 | 空（禁用） | 独立 callTracer RPC；不得与扫块能力混为一谈 |
 | `RH_TRACE_TIMEOUT_MS` | 否 | `8000` | 单笔 trace HTTP 超时；必须大于 0 |
 | `RH_SQLITE_PATH` | 否 | `/data/robinhood_meme.sqlite3` | 本地开发可 `./data/...` |
@@ -54,7 +56,7 @@
 | `RH_EVENT_PURGE_SLEEP_MS` | 否 | `100` | 批次间隔 |
 | `RH_EVENT_PURGE_MAX_PER_RUN` | 否 | `5000` | 单轮最多删除行数 |
 
-校验：`WALLET_RELOAD_MS > 1000` 拒绝启动（需求 ≤1s）。`PRICE_FLUSH_SEC < 1` 拒绝。空 `RH_RPC_URL` 拒绝。`RH_EVENT_RETENTION_DAYS < 1` 拒绝。`RH_EVENT_PURGE_BATCH < 1` 或 `> 5000` 拒绝。`RH_LOG_DIR` 非空时必须是绝对路径，打不开则拒绝启动。
+校验：`WALLET_RELOAD_MS > 1000` 拒绝启动（需求 ≤1s）。`PRICE_FLUSH_SEC < 1` 拒绝。空 `RH_RPC_URL` 拒绝。`RH_EVENT_RETENTION_DAYS < 1` 拒绝。`RH_EVENT_PURGE_BATCH < 1` 或 `> 5000` 拒绝。`RH_LOG_DIR` 非空时必须是绝对路径，打不开则拒绝启动。`RH_BLOCK_FETCH_MODE` 仅 `batch`/`pair`。`RH_RECEIPT_METHOD` 仅 `eth_getBlockReceipts`/`alchemy_getTransactionReceipts`。
 
 ## 启动顺序
 

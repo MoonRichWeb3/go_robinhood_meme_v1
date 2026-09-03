@@ -124,6 +124,7 @@ func New(ctx context.Context, cfg config.Config, logger *logx.Logger) (*App, err
 	poller, err := chain.NewPoller(client, data, a.ProcessBlock, logger, chain.PollerConfig{
 		FromBlock: cfg.FromBlock, MaxBlocksPerTick: uint64(cfg.MaxBlocksPerTick),
 		LagWarn: uint64(cfg.HealthLagWarn), PollInterval: time.Duration(cfg.PollMS) * time.Millisecond,
+		FetchMode: cfg.BlockFetchMode, ReceiptMethod: cfg.ReceiptMethod,
 	})
 	if err != nil {
 		return fail(err)

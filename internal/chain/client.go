@@ -86,9 +86,87 @@ func NewClient(ctx context.Context, endpoint, userAgent string, timeout time.Dur
 	return c, nil
 }
 
+// BatchCall 是 JSON-RPC HTTP 批量中的一条调用。
+type BatchCall struct {
+	Method string
+	Params any
+}
+
 // Call 执行一次有界 JSON-RPC 请求并严格处理 HTTP/RPC 错误。
 func (c *Client) Call(ctx context.Context, method string, params any, out any) error {
 	return c.call(ctx, method, params, out, maxRPCResponseBytes)
+}
+
+// CallBatch 一次 HTTP 提交多条 JSON-RPC；任一条错误则整批失败，不使用部分结果。
+func (c *Client) CallBatch(ctx context.Context, calls []BatchCall, outs []any) error {
+	if len(calls) == 0 {
+		return fmt.Errorf("JSON-RPC 批量不能为空")
+	}
+	if len(outs) != len(calls) {
+		return fmt.Errorf("JSON-RPC 批量输出数量必须与调用数量一致")
+	}
+	reqs := make([]rpcRequest, len(calls))
+	ids := make([]uint64, len(calls))
+	for i, item := range calls {
+		id := c.nextID.Add(1)
+		ids[i] = id
+		reqs[i] = rpcRequest{JSONRPC: "2.0", ID: id, Method: item.Method, Params: item.Params}
+	}
+	body, err := json.Marshal(reqs)
+	if err != nil {
+		return err
+	}
+	raw, err := c.post(ctx, body, maxRPCResponseBytes)
+	if err != nil {
+		return err
+	}
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 {
+		return fmt.Errorf("解码 RPC 批量响应: 空响应")
+	}
+	if raw[0] == '{' {
+		var envelope rpcResponse
+		if err = json.Unmarshal(raw, &envelope); err != nil {
+			return fmt.Errorf("解码 RPC 批量响应: %w", err)
+		}
+		if envelope.Error != nil {
+			return envelope.Error
+		}
+		return fmt.Errorf("RPC 批量响应必须是数组")
+	}
+	var envelopes []rpcResponse
+	if err = json.Unmarshal(raw, &envelopes); err != nil {
+		return fmt.Errorf("解码 RPC 批量响应: %w", err)
+	}
+	if len(envelopes) != len(calls) {
+		return fmt.Errorf("RPC 批量响应条数不匹配: 期望=%d 实际=%d", len(calls), len(envelopes))
+	}
+	byID := make(map[uint64]rpcResponse, len(envelopes))
+	for _, envelope := range envelopes {
+		if _, ok := byID[envelope.ID]; ok {
+			return fmt.Errorf("RPC 批量响应 id 重复: %d", envelope.ID)
+		}
+		byID[envelope.ID] = envelope
+	}
+	for i, id := range ids {
+		envelope, ok := byID[id]
+		if !ok {
+			return fmt.Errorf("RPC 响应 id 不匹配: 期望=%d", id)
+		}
+		if envelope.Error != nil {
+			return envelope.Error
+		}
+		if string(envelope.Result) == "null" {
+			return fmt.Errorf("RPC %s 返回 null", calls[i].Method)
+		}
+		if outs[i] == nil {
+			continue
+		}
+		if err = json.Unmarshal(envelope.Result, outs[i]); err != nil {
+			return fmt.Errorf("解码 RPC %s 结果: %w", calls[i].Method, err)
+		}
+	}
+	return nil
 }
 
 // call 执行带独立响应上限的 RPC，避免节点返回无界 JSON 占满进程内存。
@@ -98,38 +176,9 @@ func (c *Client) call(ctx context.Context, method string, params any, out any, r
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	raw, err := c.post(ctx, body, responseLimit)
 	if err != nil {
 		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", c.userAgent)
-	resp, err := c.http.Do(req)
-	if err != nil {
-		if ctxErr := ctx.Err(); ctxErr != nil {
-			return ctxErr
-		}
-		var netErr net.Error
-		if errors.As(err, &netErr) && netErr.Timeout() {
-			return fmt.Errorf("RPC HTTP 请求超时")
-		}
-		// net/http 的原始错误可能带完整 URL；这里禁止把 RPC 凭据送入上层日志。
-		return fmt.Errorf("RPC HTTP 请求失败")
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-		return fmt.Errorf("RPC HTTP 状态 %d", resp.StatusCode)
-	}
-	if responseLimit < 1 {
-		return fmt.Errorf("RPC 响应上限必须大于 0")
-	}
-	raw, err := io.ReadAll(io.LimitReader(resp.Body, responseLimit+1))
-	if err != nil {
-		return fmt.Errorf("读取 RPC 响应: %w", err)
-	}
-	if int64(len(raw)) > responseLimit {
-		return fmt.Errorf("RPC 响应超过 %d 字节上限", responseLimit)
 	}
 	var envelope rpcResponse
 	if err = json.Unmarshal(raw, &envelope); err != nil {
@@ -148,6 +197,42 @@ func (c *Client) call(ctx context.Context, method string, params any, out any, r
 		return nil
 	}
 	return json.Unmarshal(envelope.Result, out)
+}
+
+func (c *Client) post(ctx context.Context, body []byte, responseLimit int64) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", c.userAgent)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		var netErr net.Error
+		if errors.As(err, &netErr) && netErr.Timeout() {
+			return nil, fmt.Errorf("RPC HTTP 请求超时")
+		}
+		return nil, fmt.Errorf("RPC HTTP 请求失败")
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
+		return nil, fmt.Errorf("RPC HTTP 状态 %d", resp.StatusCode)
+	}
+	if responseLimit < 1 {
+		return nil, fmt.Errorf("RPC 响应上限必须大于 0")
+	}
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, responseLimit+1))
+	if err != nil {
+		return nil, fmt.Errorf("读取 RPC 响应: %w", err)
+	}
+	if int64(len(raw)) > responseLimit {
+		return nil, fmt.Errorf("RPC 响应超过 %d 字节上限", responseLimit)
+	}
+	return raw, nil
 }
 
 // BlockNumber 返回当前链头高度。

@@ -34,6 +34,7 @@ type PollLogger interface {
 type PollerConfig struct {
 	FromBlock, MaxBlocksPerTick, LagWarn uint64
 	PollInterval                         time.Duration
+	FetchMode, ReceiptMethod             string
 }
 
 type Poller struct {
@@ -57,7 +58,19 @@ func NewPoller(client *Client, state WatermarkStore, process func(context.Contex
 	if config.LagWarn == 0 {
 		config.LagWarn = 50
 	}
-	receipts := NewReceiptFetcher(client)
+	if config.FetchMode == "" {
+		config.FetchMode = FetchModeBatch
+	}
+	if config.FetchMode != FetchModeBatch && config.FetchMode != FetchModePair {
+		return nil, fmt.Errorf("RH_BLOCK_FETCH_MODE 仅支持 batch/pair")
+	}
+	if config.ReceiptMethod == "" {
+		config.ReceiptMethod = ReceiptMethodEthBlock
+	}
+	if config.ReceiptMethod != ReceiptMethodEthBlock && config.ReceiptMethod != ReceiptMethodAlchemy {
+		return nil, fmt.Errorf("RH_RECEIPT_METHOD 仅支持 %s/%s", ReceiptMethodEthBlock, ReceiptMethodAlchemy)
+	}
+	receipts := NewReceiptFetcherMode(client, config.ReceiptMethod, config.FetchMode == FetchModeBatch)
 	return &Poller{
 		client: client, receipts: receipts, state: state, process: process, logger: logger, config: config,
 		fetch: receipts.FetchBlock,
@@ -74,7 +87,7 @@ func (p *Poller) Run(ctx context.Context) error {
 		return err
 	}
 	if !p.receipts.blockMethod && p.logger != nil {
-		p.logger.Error(map[string]any{"类型": "RPC回退", "方法": "eth_getTransactionReceipt"})
+		p.logger.Error(map[string]any{"类型": "RPC回退", "方法": "eth_getTransactionReceipt", "原方法": p.receipts.receiptMethod()})
 	}
 	backoff := 200 * time.Millisecond
 	for {
