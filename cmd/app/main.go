@@ -26,11 +26,23 @@ func main() {
 		}
 		return
 	}
-	logger := logx.New(os.Stdout, envOr("LOG_LEVEL", "info"))
+	stdout := logx.New(os.Stdout, envOr("LOG_LEVEL", "info"))
 	cfg, err := config.Load()
 	if err != nil {
-		logger.Error(map[string]any{"类型": "启动失败", "错误": err})
+		stdout.Error(map[string]any{"类型": "启动失败", "错误": err})
 		os.Exit(1)
+	}
+	logFile, err := logx.OpenDirFile(cfg.LogDir)
+	if err != nil {
+		stdout.Error(map[string]any{"类型": "启动失败", "错误": err})
+		os.Exit(1)
+	}
+	if logFile != nil {
+		defer logFile.Close()
+	}
+	logger := logx.New(os.Stdout, cfg.LogLevel)
+	if logFile != nil {
+		logger = logx.New(io.MultiWriter(os.Stdout, logFile), cfg.LogLevel)
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

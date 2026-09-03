@@ -1,15 +1,27 @@
 services:
+  logs-init:
+    image: busybox:1.37
+    user: "0:0"
+    restart: "no"
+    command: ["sh", "-c", "mkdir -p /logs && chown -R 65532:65532 /logs"]
+    volumes:
+      - ./logs:/logs
   robinhood-meme:
     build:
       context: .
     restart: unless-stopped
+    depends_on:
+      logs-init:
+        condition: service_completed_successfully
     env_file:
       - .env
     environment:
       RH_SQLITE_PATH: /data/robinhood_meme.sqlite3
       RH_HTTP_ADDR: 0.0.0.0:8888
+      RH_LOG_DIR: /logs
     volumes:
       - robinhood-data:/data
+      - ./logs:/logs
     ports:
       - "127.0.0.1:8888:8888"
     healthcheck:

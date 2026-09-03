@@ -1,21 +1,44 @@
-// Package logx 统一渲染中文标签与中文键名的结构化标准输出。
+// Package logx 统一渲染中文标签与中文键名的结构化日志；默认 stdout，可选同时写入磁盘文件。
 package logx
 
 import (
 	"fmt"
 	"io"
 	"log"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 )
 
+// FileName 是 RH_LOG_DIR 目录下的日志文件名。
+const FileName = "robinhood-meme.log"
+
 // Logger 是并发安全的中文结构化日志器。
 type Logger struct {
 	mu    sync.Mutex
 	out   *log.Logger
 	level int
+}
+
+// OpenDirFile 在 dir 下以追加方式打开日志文件。dir 为空表示不写磁盘，返回 nil。
+// TODO(log-rotate): 功能待实现：日志文件按大小/天数滚动；缺失逻辑：切分、压缩与保留份数；待确认：是否引入 lumberjack 以及生产磁盘上限。
+func OpenDirFile(dir string) (*os.File, error) {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return nil, nil
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return nil, fmt.Errorf("创建日志目录: %w", err)
+	}
+	path := filepath.Join(dir, FileName)
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return nil, fmt.Errorf("打开日志文件: %w", err)
+	}
+	return file, nil
 }
 
 // New 创建日志器；支持 debug、info、warn、error 四级。

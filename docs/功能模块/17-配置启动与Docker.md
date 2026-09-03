@@ -1,6 +1,6 @@
 # 17 配置启动与 Docker
 
-- 最新更新时间：2026-09-02 22:38 (UTC+8)
+- 最新更新时间：2026-09-03 10:55 (UTC+8)
 - 适用范围：`cmd/`、`internal/config`、镜像与 compose
 - 来源：架构 §6、§8；底稿 §7.4、§8；调研 `01`（RPC/UA）、`11`（trace RPC）
 - 对应需求：非功能部署；密钥不进镜像
@@ -40,6 +40,7 @@
 | `RH_HEALTH_LAG_WARN` | 否 | `50` | |
 | `RH_HTTP_QUERY_MS` | 否 | `3000` | |
 | `LOG_LEVEL` | 否 | `info` | |
+| `RH_LOG_DIR` | 否 | 空（只写 stdout） | 绝对路径；Compose 设 `/logs`，宿主机为项目根 `logs/` |
 | `RH_DIRTY_TOKEN_CAP` | 否 | `5000` | 展示价脏集合上限 |
 | `RH_BINANCE_BASE_URL` | 否 | `https://api.binance.com` | 见调研 `10`；不要把 Key 写进 URL |
 | `RH_BINANCE_ETH_SYMBOL` | 否 | `ETHUSDT` | |
@@ -53,7 +54,7 @@
 | `RH_EVENT_PURGE_SLEEP_MS` | 否 | `100` | 批次间隔 |
 | `RH_EVENT_PURGE_MAX_PER_RUN` | 否 | `5000` | 单轮最多删除行数 |
 
-校验：`WALLET_RELOAD_MS > 1000` 拒绝启动（需求 ≤1s）。`PRICE_FLUSH_SEC < 1` 拒绝。空 `RH_RPC_URL` 拒绝。`RH_EVENT_RETENTION_DAYS < 1` 拒绝。`RH_EVENT_PURGE_BATCH < 1` 或 `> 5000` 拒绝。
+校验：`WALLET_RELOAD_MS > 1000` 拒绝启动（需求 ≤1s）。`PRICE_FLUSH_SEC < 1` 拒绝。空 `RH_RPC_URL` 拒绝。`RH_EVENT_RETENTION_DAYS < 1` 拒绝。`RH_EVENT_PURGE_BATCH < 1` 或 `> 5000` 拒绝。`RH_LOG_DIR` 非空时必须是绝对路径，打不开则拒绝启动。
 
 ## 启动顺序
 
@@ -75,7 +76,7 @@ HTTP 挂了不应停扫块；扫块挂了进程退出（否则健康检查撒谎
 
 ```text
 镜像：仅二进制 + migrations SQL
-挂载：./data → /data
+挂载：robinhood-data → /data；./logs → /logs
 用户：非 root 建议
 不 COPY .env
 ```
@@ -88,7 +89,7 @@ compose 用 `env_file`（不入库）。健康检查：`GET /health` 或进程�
 
 ## 日志
 
-启动成功打一行中文：RPC 已连接（不要打印完整 URL 中的密钥；脱敏 query）。`[错误]` 启动失败原因。
+启动成功打一行中文：RPC 已连接（不要打印完整 URL 中的密钥；脱敏 query）。`[错误]` 启动失败原因。`RH_LOG_DIR` 无法创建或打开时拒绝启动。
 
 ## 失败
 

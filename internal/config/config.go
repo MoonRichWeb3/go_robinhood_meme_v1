@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -14,7 +15,7 @@ import (
 
 // Config 汇总 v0 进程全部环境变量；业务公式不属于配置。
 type Config struct {
-	RPCURL, TraceRPCURL, HTTPUserAgent, SQLitePath, LogLevel   string
+	RPCURL, TraceRPCURL, HTTPUserAgent, SQLitePath, LogLevel, LogDir string
 	BinanceBaseURL, BinanceETHSymbol                           string
 	FromBlock, ChainID                                         uint64
 	PollMS, MaxBlocksPerTick, RPCTimeoutMS, TraceTimeoutMS     int
@@ -35,6 +36,7 @@ func Load() (Config, error) {
 	c.HTTPUserAgent = envString("RH_HTTP_UA", "go-robinhood-meme/v0")
 	c.SQLitePath = envString("RH_SQLITE_PATH", "/data/robinhood_meme.sqlite3")
 	c.LogLevel = strings.ToLower(envString("LOG_LEVEL", "info"))
+	c.LogDir = strings.TrimSpace(os.Getenv("RH_LOG_DIR"))
 	c.BinanceBaseURL = envString("RH_BINANCE_BASE_URL", "https://api.binance.com")
 	c.BinanceETHSymbol = envString("RH_BINANCE_ETH_SYMBOL", "ETHUSDT")
 	var err error
@@ -119,6 +121,9 @@ func (c Config) Validate() error {
 	case "debug", "info", "warn", "error":
 	default:
 		return fmt.Errorf("LOG_LEVEL 仅支持 debug/info/warn/error")
+	}
+	if c.LogDir != "" && !filepath.IsAbs(c.LogDir) {
+		return fmt.Errorf("RH_LOG_DIR 必须是绝对路径")
 	}
 	return nil
 }
